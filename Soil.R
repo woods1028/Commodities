@@ -1,11 +1,11 @@
-
+require(soilDB)
 
 soil_profile <- function(state_name,county_code) {
   
   state_code <- fips_county_codes %>% 
     rename(
-      State_Code=`State.Code.(FIPS)`,
-      Area=`Area.Name.(including.legal/statistical.area.description)`
+      State_Code=`State Code (FIPS)`,
+      Area=`Area Name (including legal/statistical area description)`
     ) %>% 
     filter(toupper(Area)==toupper(state_name)) %>% 
     pull(State_Code)
@@ -37,7 +37,15 @@ soil_profile <- function(state_name,county_code) {
     sep = ""
   )
   
-  SDA_query(query) %>% 
+  result <- SDA_query(query) %>% 
+    suppressMessages
+    
+  if (is.null(result)==T) {
+    return(result)
+  }
+  
+  result %>% 
+    tibble %>% 
     mutate(
       state_code=state_code,
       county_code=county_code,
@@ -49,12 +57,12 @@ soil_profile <- function(state_name,county_code) {
 state_soil_profile <- function(state_name) {
   
   fips_state_code <- fips_county_codes %>% 
-    filter(Summary.Level=="040",`Area.Name.(including.legal/statistical.area.description)`==state_name) %>% 
-    pull(`State.Code.(FIPS)`)
+    filter(`Summary Level`=="040",`Area Name (including legal/statistical area description)`==state_name) %>% 
+    pull(`State Code (FIPS)`)
   
   counties_state <- fips_county_codes %>% 
-    filter(Summary.Level=="050",`State.Code.(FIPS)`==fips_state_code) %>% 
-    pull(`County.Code.(FIPS)`)
+    filter(`Summary Level`=="050",`State Code (FIPS)`==fips_state_code) %>% 
+    pull(`County Code (FIPS)`)
   
   counties_state %>% 
     lapply(function(x) {
@@ -64,41 +72,33 @@ state_soil_profile <- function(state_name) {
   
 }
 
-res4 <- state_soil_profile(state_name = "Nebraska")
-
-dirt <- c("Iowa","Illinois","Nebraska") %>% 
-  lapply(state_soil_profile) %>% 
+dirt <- state.name %>% 
+  lapply(function(x) {
+    print(x) 
+    state_number <- match(x,state.name)
+    if (state_number>1 & state_number%%5==1) {
+      print("Waiting 1 min...")
+      Sys.sleep(60)
+    }
+    state_soil_profile(x) %>% 
+      suppressWarnings
+  }) %>% 
   bind_rows
 
 depth_buckets <- c(0,6,12,30,50,70,100)
 
-dirt %>% 
+dirt_by_county <- dirt %>% 
   mutate_at(vars(matches("hzdep")),~./2.54) %>% 
   mutate(Depth=(hzdept_r+hzdepb_r)/2) %>% 
   mutate(Depth_Bucket=cut(Depth,depth_buckets)) %>% 
-  group_by(state_name,county_code,mukey,Depth_Bucket) %>% 
+  group_by(state_name,county_code,state_code,mukey,Depth_Bucket) %>% 
   summarise_at(vars(cec7_r,hzdepb_r,ph1to1h2o_r),~weighted.mean(.,w = comppct_r,na.rm = T)) %>% 
-  group_by(state_name,county_code,Depth_Bucket) %>% 
+  group_by(state_name,county_code,state_code,Depth_Bucket) %>% 
   summarise_at(vars(cec7_r,hzdepb_r,ph1to1h2o_r),~mean(.,na.rm = T)) %>% 
   ungroup %>% 
   rename(CEC=cec7_r,PH=ph1to1h2o_r) %>% 
-  setDT %>% 
-  melt(
-    id.vars = c("state_name","county_name","Depth_Bucket"),
-    variable.factor = F,
-    variable.name = "Metric",
-    value.name = "Value"
-  ) %>%
-  filter(Metric %in% c("CEC","PH")) %>% 
   filter(!is.na(Depth_Bucket)) %>% 
-  mutate_at(vars(county_name),toupper) %>% 
-  left_join(
-    outliers,
-    by="county_name"
-  ) %>% 
-  filter(!is.na(Direction)) %>% 
-  ggplot(mapping = aes(x=Depth_Bucket,y=Value,color=Direction,group=county_name))+
-  geom_line(lwd = 1.5)+
-  geom_point(size = 2)+
-  facet_grid(Metric~.,scales = "free_y",switch = "both")+
-  labs(y="",x="Depth",color="")
+  pivot_wider(id_cols = c(state_code,county_code),names_from = Depth_Bucket,values_from = c(CEC,PH))
+
+dirt_by_county %>% 
+  write_excel_csv("Dirt By County.csv")
